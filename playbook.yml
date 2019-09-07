@@ -1,0 +1,157 @@
+---
+- hosts:  all
+  user:  pi
+  become: yes
+  become_method:  sudo
+
+  tasks:
+  - name:  Install network packages
+    apt:
+      name:  "{{ packages }}"
+      update_cache: yes
+    vars:
+      packages:
+        - dnsutils
+        - nmap
+        - traceroute
+        - mtr
+
+  #
+  # NOTE:  This is specific to the PHP7.3 on Raspbian 10
+  #
+  - name:  Install Observium dependencies
+    apt:
+      name:  "{{ packages }}"
+      state: present
+    vars:
+      php_version:  7.3
+      packages:
+       - libapache2-mod-php{{ php_version }}
+       - php{{ php_version }}-cli
+       - php{{ php_version }}-mysql
+       - php{{ php_version }}-mysqli
+       - php{{ php_version }}-gd
+       - php{{ php_version }}-json
+       - php-pear
+       - snmp
+       - fping
+       - default-mysql-server
+       - default-mysql-client
+       - python-mysqldb
+       - rrdtool
+       - subversion
+       - whois
+       - mtr-tiny
+       - ipmitool
+       - graphviz
+       - imagemagick
+       - apache2 
+
+  - name:  Download and unpack Observium
+    unarchive:
+      remote_src: yes
+      src:  http://www.observium.org/observium-community-latest.tar.gz
+      dest:  /opt
+      creates:  /opt/observium
+
+  - name:  Create observium database
+    mysql_db:
+      name: observium
+      state: present
+
+  - name:  Create observium user
+    mysql_user:
+      name:  observium
+      password:  ObserviumDbPassword
+      priv:  "observium.*:ALL"
+
+  # 
+  # NOTE:  Change these variables for your site and encrypt (vault) the password
+  # 
+  - name:  Install config.php
+    vars:
+      OBSERVIUM_DB_USERNAME:  'observium'
+      OBSERVIUM_DB_PASSWORD:  'ObserviumDbPassword'
+    template:
+      src:  config.php.j2
+      dest: /opt/observium/config.php
+
+  - name:  Set up the database
+    command:  /opt/observium/discovery.php -u
+
+  - name:  Create Observium log directory
+    file:
+      dest:  /opt/observium/logs
+      state: directory
+
+  - name:  Create RRD directory
+    file:
+      dest:  /opt/observium/rrd
+      state: directory
+      owner: www-data
+      group: www-data
+
+  - name:  Install apache2 configuration for Observium
+    copy:
+      src:  observium.conf
+      dest: /etc/apache2/sites-available/
+
+  - name:  Remove original apache2 000-
+    file:
+      dest:  /etc/apache2/sites-available/000-default.conf
+      state: absent
+
+  - name:  Enable rewrite module
+    apache2_module:  
+      name:  rewrite
+      state: present
+
+  - name:  Enable Observium
+    command:  a2ensite observium
+    notify:
+      - restart apache2
+
+  # 
+  # NOTE:  Change these variables for your site and encrypt (vault) the password
+  # 
+  - name:  Create Observium administrator user
+    vars:
+      OBSERVIUM_ADMIN_USERNAME:  administrator
+      OBSERVIUM_ADMIN_PASSWORD:  administrator
+    command:  '/opt/observium/adduser.php {{ OBSERVIUM_ADMIN_USERNAME }} {{ OBSERVIUM_ADMIN_PASSWORD }} 10'
+
+  - name:  Set up Observium tasks
+    block:
+      - cron:
+          name:  'Run a complete discovery of all devices once every 6 hours'
+          minute: 33
+          hour:   '*/6'
+          job:    '/opt/observium/discovery.php -h all >> /dev/null 2>&1'
+
+      - cron:
+          name:  'Run automated discovery of newly added devices every 5 minutes'
+          minute:  '*/5'
+          job:     '/opt/observium/discovery.php -h new >> /dev/null 2>&1'
+
+      - cron:
+          name:  'Run multithreaded poller wrapper every 5 minutes'
+          minute:  '*/5'
+          job:     '/opt/observium/poller-wrapper.py >> /dev/null 2>&1'
+
+      - cron:
+          name:  'Run housekeeping script daily for syslog, eventlog and alert log'
+          minute:  13
+          hour:    5
+          job:  '/opt/observium/housekeeping.php -ysel >> /dev/null 2>&1'
+
+      - cron:
+          name:  'Run housekeeping script daily for rrds, ports, orphaned entries in the database and performance data'
+          minute:  47
+          hour:    4
+          job:  '/opt/observium/housekeeping.php -yrptb >> /dev/null 2>&1'
+
+  handlers:
+    - name:  restart apache2
+      service:
+        name:  apache2
+        state: restarted
